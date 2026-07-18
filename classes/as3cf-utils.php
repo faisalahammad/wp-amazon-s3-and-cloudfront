@@ -149,6 +149,14 @@ if ( ! class_exists( 'AS3CF_Utils' ) ) {
 		/**
 		 * Parses a URL into its components. Compatible with PHP < 5.4.7.
 		 *
+		 * On PHP 8.2+ the native parse_url() mangles bytes in the C1 control
+		 * range (0x80-0x9F and 0xAD) inside the path, query, and fragment by
+		 * replacing them with '_'. That corrupts any URL containing UTF-8
+		 * continuation bytes (notably CJK filenames) and breaks the str_replace
+		 * find keys used to rewrite offloaded media URLs. We re-extract those
+		 * three components from the original input so the original bytes are
+		 * preserved.
+		 *
 		 * @param string $url       The URL to parse.
 		 *
 		 * @param int    $component PHP_URL_ constant for URL component to return.
@@ -171,6 +179,87 @@ if ( ! class_exists( 'AS3CF_Utils' ) ) {
 
 			if ( $no_scheme && is_array( $parts ) ) {
 				unset( $parts['scheme'] );
+			}
+
+			if ( is_array( $parts ) ) {
+				$parts = self::restore_path_query_fragment( $url, $parts );
+			}
+
+			return $parts;
+		}
+
+		/**
+		 * Re-extract path, query, and fragment from the raw input URL so that
+		 * bytes in the C1 control range are not replaced with '_' as PHP 8.2+
+		 * parse_url() does. Only overrides a component when the manual result
+		 * differs from what parse_url returned, so ASCII URLs are unchanged.
+		 *
+		 * @param string $url   The (trimmed) URL passed to parse_url().
+		 * @param array  $parts The components returned by wp_parse_url().
+		 *
+		 * @return array
+		 */
+		private static function restore_path_query_fragment( $url, $parts ) {
+			$after_authority = $url;
+
+			if ( preg_match( '/^[a-zA-Z][a-zA-Z0-9+.\-]*:\/\//', $after_authority, $scheme_match, PREG_OFFSET_CAPTURE ) ) {
+				$after_authority = substr( $after_authority, $scheme_match[0][1] + strlen( $scheme_match[0][0] ) );
+			}
+
+			$authority_end = strlen( $after_authority );
+			$first_slash   = strpos( $after_authority, '/' );
+			$first_query   = strpos( $after_authority, '?' );
+			$first_hash    = strpos( $after_authority, '#' );
+			foreach ( array( $first_slash, $first_query, $first_hash ) as $candidate ) {
+				if ( false !== $candidate && $candidate < $authority_end ) {
+					$authority_end = $candidate;
+				}
+			}
+
+			$at = strpos( $after_authority, '@' );
+			if ( false !== $at && $at < $authority_end ) {
+				$after_authority = substr( $after_authority, $at + 1 );
+			}
+
+			$host_end = strlen( $after_authority );
+			$first_slash = strpos( $after_authority, '/' );
+			$first_query = strpos( $after_authority, '?' );
+			$first_hash  = strpos( $after_authority, '#' );
+			foreach ( array( $first_slash, $first_query, $first_hash ) as $candidate ) {
+				if ( false !== $candidate && $candidate < $host_end ) {
+					$host_end = $candidate;
+				}
+			}
+			$remainder = substr( $after_authority, $host_end );
+
+			$path     = '';
+			$query    = null;
+			$fragment = null;
+
+			$hash_pos = strpos( $remainder, '#' );
+			if ( false !== $hash_pos ) {
+				$fragment  = substr( $remainder, $hash_pos + 1 );
+				$remainder = substr( $remainder, 0, $hash_pos );
+			}
+			$q_pos = strpos( $remainder, '?' );
+			if ( false !== $q_pos ) {
+				$query = substr( $remainder, $q_pos + 1 );
+				$path  = substr( $remainder, 0, $q_pos );
+			} else {
+				$path = $remainder;
+			}
+
+			// Override only when the manual extraction yields a different
+			// result. ASCII URLs match parse_url byte-for-byte so they pass
+			// through unchanged; CJK URLs differ and get the original bytes.
+			if ( isset( $parts['path'] ) && $path !== $parts['path'] ) {
+				$parts['path'] = $path;
+			}
+			if ( null !== $query && ( ! isset( $parts['query'] ) || $query !== $parts['query'] ) ) {
+				$parts['query'] = $query;
+			}
+			if ( null !== $fragment && ( ! isset( $parts['fragment'] ) || $fragment !== $parts['fragment'] ) ) {
+				$parts['fragment'] = $fragment;
 			}
 
 			return $parts;
